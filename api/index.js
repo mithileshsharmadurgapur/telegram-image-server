@@ -4,7 +4,7 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // 2. Handle OPTIONS preflight request immediately
+  // 2. Handle OPTIONS preflight request extremely early and return
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -33,16 +33,15 @@ module.exports = async (req, res) => {
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
     const buffer = Buffer.from(base64Data, 'base64');
     
-    // Convert Buffer to Blob (Native in Node 18+)
+    // 5. Construct FormData using Native Node.js 18+ APIs (No Axios, No external form-data package)
     const blob = new Blob([buffer], { type: 'image/jpeg' });
-    
-    // Construct FormData (Native in Node 18+)
     const formData = new FormData();
     formData.append('chat_id', chatId);
     formData.append('photo', blob, 'image.jpg');
 
-    // 5. Send to Telegram API
+    // 6. Send to Telegram API using Native fetch()
     const telegramUrl = `https://api.telegram.org/bot${botToken}/sendPhoto`;
+    
     const response = await fetch(telegramUrl, {
       method: 'POST',
       body: formData
@@ -50,17 +49,16 @@ module.exports = async (req, res) => {
 
     const data = await response.json();
 
-    if (!data.ok) {
-      console.error('Telegram Error:', data);
+    if (!response.ok || !data.ok) {
+      console.error('Telegram API Error:', data);
       return res.status(500).json({ error: 'Failed to upload to Telegram', details: data });
     }
 
-    // 6. Extract the file_id for the original (highest resolution) image
-    // Telegram returns an array of photo sizes; the last item is the largest.
+    // 7. Extract the file_id for the original (highest resolution) image
     const fileSizes = data.result.photo;
     const fileId = fileSizes[fileSizes.length - 1].file_id;
 
-    // 7. Return the file_id to the frontend
+    // 8. Return the file_id to the frontend
     return res.status(200).json({ success: true, file_id: fileId });
 
   } catch (error) {
@@ -68,4 +66,3 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: 'Internal Server Error', message: error.message });
   }
 };
-
