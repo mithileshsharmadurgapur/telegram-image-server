@@ -1,68 +1,89 @@
-module.exports = async (req, res) => {
-  // 1. Explicitly set CORS headers at the very beginning of the request
+export default async function handler(req, res) {
+  // 1. CORS Setup (वेबसाइट को सर्वर से बात करने की इजाज़त)
+  res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 
-  // 2. Handle OPTIONS preflight request extremely early and return
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    res.status(200).end();
+    return;
   }
 
-  // Ensure it's a POST request
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // 2. पार्सल (Payload) में से Data और Name निकालना
+  const { fileBase64, fileName } = req.body;
+
+  if (!fileBase64) {
+    return res.status(400).json({ error: "No fileBase64 provided in request body." });
+  }
+
+  const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    return res.status(500).json({ error: "Telegram keys missing in Vercel." });
   }
 
   try {
-    const { imageBase64 } = req.body || {};
-
-    // 3. Retrieve secrets securely from Vercel Environment Variables
-    const botToken = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-
-    if (!botToken || !chatId) {
-      return res.status(500).json({ error: 'Server misconfiguration: missing tokens.' });
+    // 3. Base64 को खोलना और चेक करना कि यह क्या है (Image या PDF/Excel)
+    const matches = fileBase64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+    if (!matches || matches.length !== 3) {
+      return res.status(400).json({ error: "Invalid Base64 format." });
     }
 
-    if (!imageBase64) {
-      return res.status(400).json({ error: 'No imageBase64 provided in request body.' });
-    }
-
-    // 4. Strip out any "data:image/jpeg;base64," prefix and decode Base64
-    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const mimeType = matches[1];
+    const base64Data = matches[2];
     const buffer = Buffer.from(base64Data, 'base64');
+    const isImage = mimeType.startsWith('image/');
     
-    // 5. Construct FormData using Native Node.js 18+ APIs (No Axios, No external form-data package)
-    const blob = new Blob([buffer], { type: 'image/jpeg' });
-    const formData = new FormData();
-    formData.append('chat_id', chatId);
-    formData.append('photo', blob, 'image.jpg');
+    // अगर कोई नाम नहीं आया, तो डिफ़ॉल्ट नाम रखें
+    const finalFileName = fileName || (isImage ? 'upload.jpg' : 'document.pdf');
 
-    // 6. Send to Telegram API using Native fetch()
-    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendPhoto`;
+    // 4. टेलीग्राम को भेजने के लिए पार्सल तैयार करना
+    const formData = new FormData();
+    formData.append('chat_id', TELEGRAM_CHAT_ID);
     
-    const response = await fetch(telegramUrl, {
-      method: 'POST',
-      body: formData
+    const blob = new Blob([buffer], { type: mimeType });
+    let telegramApiUrl = "";
+    
+    if (isImage) {
+        // फोटो के लिए sendPhoto
+        formData.append('photo', blob, finalFileName);
+        telegramApiUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`;
+    } else {
+        // PDF, Excel आदि के लिए sendDocument
+        formData.append('document', blob, finalFileName);
+        telegramApiUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`;
+    }
+
+    // 5. टेलीग्राम को पार्सल भेजना
+    const response = await fetch(telegramApiUrl, {
+        method: 'POST',
+        body: formData
     });
 
     const data = await response.json();
 
-    if (!response.ok || !data.ok) {
-      console.error('Telegram API Error:', data);
-      return res.status(500).json({ error: 'Failed to upload to Telegram', details: data });
+    if (!data.ok) {
+        return res.status(400).json({ error: "Failed to upload to Telegram", details: data });
     }
 
-    // 7. Extract the file_id for the original (highest resolution) image
-    const fileSizes = data.result.photo;
-    const fileId = fileSizes[fileSizes.length - 1].file_id;
+    // 6. रसीद (file_id) निकालकर वापस ऐप को देना
+    let file_id = "";
+    if (isImage && data.result.photo) {
+        file_id = data.result.photo[data.result.photo.length - 1].file_id;
+    } else if (data.result.document) {
+        file_id = data.result.document.file_id;
+    }
 
-    // 8. Return the file_id to the frontend
-    return res.status(200).json({ success: true, file_id: fileId });
+    return res.status(200).json({ success: true, file_id: file_id });
 
   } catch (error) {
-    console.error('Server error:', error);
-    return res.status(500).json({ error: 'Internal Server Error', message: error.message });
+    console.error("Error:", error);
+    return res.status(500).json({ error: error.message });
   }
-};
+}
